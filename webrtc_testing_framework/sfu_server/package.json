@@ -1,0 +1,23 @@
+{
+  "name": "webrtc-sfu-server",
+  "version": "1.0.0",
+  "description": "Selective Forwarding Unit using mediasoup",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "nodemon server.js"
+  },
+  "dependencies": {
+    "mediasoup": "^3.13.24",
+    "express": "^4.19.2",
+    "socket.io": "^4.7.5",
+    "socket.io-client": "^4.7.5",
+    "cors": "^2.8.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "keywords": ["webrtc", "sfu", "mediasoup"],
+  "author": "WebRTC Testing Framework",
+  "license": "MIT"
+}

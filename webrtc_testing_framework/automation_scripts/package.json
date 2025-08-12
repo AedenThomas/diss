@@ -1,0 +1,19 @@
+{
+  "name": "webrtc-automation-scripts",
+  "version": "1.0.0",
+  "description": "Automated testing scripts for WebRTC performance comparison",
+  "main": "run_tests.js",
+  "scripts": {
+    "start": "node run_tests.js",
+    "test": "node run_single_test.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.9.0",
+    "csv-writer": "^1.6.0",
+    "fs-extra": "^11.2.0",
+    "yargs": "^17.7.2"
+  },
+  "keywords": ["webrtc", "automation", "puppeteer", "testing"],
+  "author": "WebRTC Testing Framework",
+  "license": "MIT"
+}

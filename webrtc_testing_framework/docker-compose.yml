@@ -1,0 +1,109 @@
+version: '3.8'
+
+services:
+  signaling_server:
+    build:
+      context: ./signaling_server
+      dockerfile: Dockerfile
+    container_name: webrtc_signaling
+    ports:
+      - "3001:3001"
+    environment:
+      - PORT=3001
+      - NODE_ENV=production
+    networks:
+      - webrtc_network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  sfu_server:
+    build:
+      context: ./sfu_server
+      dockerfile: Dockerfile
+    container_name: webrtc_sfu
+    ports:
+      - "3002:3002"
+      - "10000-10100:10000-10100/udp"  # RTC ports for mediasoup
+    environment:
+      - PORT=3002
+      - NODE_ENV=production
+      - SIGNALING_SERVER_URL=http://signaling_server:3001
+      - ANNOUNCED_IP=127.0.0.1
+    networks:
+      - webrtc_network
+    restart: unless-stopped
+    depends_on:
+      - signaling_server
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  client:
+    build:
+      context: ./client
+      dockerfile: Dockerfile
+    container_name: webrtc_client
+    ports:
+      - "3000:3000"
+    environment:
+      - REACT_APP_SIGNALING_URL=http://localhost:3001
+      - REACT_APP_SFU_URL=http://localhost:3002
+      - NODE_ENV=production
+    networks:
+      - webrtc_network
+    restart: unless-stopped
+    depends_on:
+      - signaling_server
+      - sfu_server
+    cap_add:
+      - NET_ADMIN  # Required for traffic control (tc)
+    privileged: true  # Required for network emulation
+
+  automation:
+    build:
+      context: ./automation_scripts
+      dockerfile: Dockerfile
+    container_name: webrtc_automation
+    volumes:
+      - ./results:/app/results
+      - /var/run/docker.sock:/var/run/docker.sock  # For Docker-in-Docker
+    environment:
+      - NODE_ENV=production
+      - BASE_URL=http://client:3000
+    networks:
+      - webrtc_network
+    depends_on:
+      - client
+    profiles:
+      - automation  # Only run when explicitly requested
+
+  data_analysis:
+    build:
+      context: ./data_analysis
+      dockerfile: Dockerfile
+    container_name: webrtc_analysis
+    volumes:
+      - ./results:/app/data
+      - ./plots:/app/plots
+    environment:
+      - PYTHONPATH=/app
+    networks:
+      - webrtc_network
+    profiles:
+      - analysis  # Only run when explicitly requested
+
+networks:
+  webrtc_network:
+    driver: bridge
+
+volumes:
+  results:
+    driver: local
+  plots:
+    driver: local
