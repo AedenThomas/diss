@@ -261,12 +261,8 @@ class WebRTCAnalyzer:
         
         fig, ax = plt.subplots(figsize=(10, 6))
         
-        # Filter data for 5 viewers only
-        filtered_data = self.df[self.df['Num_Viewers'] == 5]
-        
-        if len(filtered_data) == 0:
-            logger.warning("No data found for 5 viewers. Using all available data.")
-            filtered_data = self.df
+        # Use all data - average latency across all viewer counts for each packet loss rate
+        filtered_data = self.df
         
         # Group by architecture and packet loss rate, calculate mean latency
         grouped_data = filtered_data.groupby(['Architecture', 'Packet_Loss_Rate'])['Avg_Latency_Ms'].agg(['mean', 'std']).reset_index()
