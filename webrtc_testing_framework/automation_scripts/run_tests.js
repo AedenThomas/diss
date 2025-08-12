@@ -23,7 +23,7 @@ class TestRunner {
     this.browser = null;
     this.networkController = new NetworkController();
     this.csvWriter = createCsvWriter({
-      path: '/app/results/test_results.csv',
+      path: '/app/results/results.csv',
       header: [
         { id: 'timestamp', title: 'Timestamp' },
         { id: 'architecture', title: 'Architecture' },
@@ -278,6 +278,31 @@ class TestRunner {
       console.error = function(...args) {
         originalError.apply(console, ['[WebRTC Error]', ...args]);
       };
+
+      // Monkey-patch RTCPeerConnection to capture instances
+      window.allPeerConnections = window.allPeerConnections || [];
+      const OriginalRTCPeerConnection = window.RTCPeerConnection;
+      
+      console.log('[WebRTC Debug] Setting up RTCPeerConnection monkey-patch, original exists:', !!OriginalRTCPeerConnection);
+      
+      window.RTCPeerConnection = function(...args) {
+        console.log('[WebRTC Debug] RTCPeerConnection constructor called with args:', args);
+        const pc = new OriginalRTCPeerConnection(...args);
+        window.allPeerConnections.push(pc);
+        console.log('[WebRTC Debug] RTCPeerConnection created, total connections:', window.allPeerConnections.length);
+        
+        // Add event listeners to track connection state
+        pc.addEventListener('connectionstatechange', () => {
+          console.log('[WebRTC Debug] Connection state changed to:', pc.connectionState);
+        });
+        
+        return pc;
+      };
+      // Copy static methods and properties
+      Object.setPrototypeOf(window.RTCPeerConnection, OriginalRTCPeerConnection);
+      Object.defineProperty(window.RTCPeerConnection, 'prototype', {
+        value: OriginalRTCPeerConnection.prototype
+      });
     });
     
     const url = `${TEST_CONFIG.baseUrl}?mode=${architecture}&role=presenter&roomId=${roomId}`;
@@ -395,6 +420,31 @@ class TestRunner {
       // Mock other MediaDevices APIs
       navigator.mediaDevices.enumerateDevices = async () => [];
       navigator.mediaDevices.getSupportedConstraints = () => ({});
+
+      // Monkey-patch RTCPeerConnection to capture instances
+      window.allPeerConnections = window.allPeerConnections || [];
+      const OriginalRTCPeerConnection = window.RTCPeerConnection;
+      
+      console.log('[WebRTC Debug] Setting up RTCPeerConnection monkey-patch, original exists:', !!OriginalRTCPeerConnection);
+      
+      window.RTCPeerConnection = function(...args) {
+        console.log('[WebRTC Debug] RTCPeerConnection constructor called with args:', args);
+        const pc = new OriginalRTCPeerConnection(...args);
+        window.allPeerConnections.push(pc);
+        console.log('[WebRTC Debug] RTCPeerConnection created, total connections:', window.allPeerConnections.length);
+        
+        // Add event listeners to track connection state
+        pc.addEventListener('connectionstatechange', () => {
+          console.log('[WebRTC Debug] Connection state changed to:', pc.connectionState);
+        });
+        
+        return pc;
+      };
+      // Copy static methods and properties
+      Object.setPrototypeOf(window.RTCPeerConnection, OriginalRTCPeerConnection);
+      Object.defineProperty(window.RTCPeerConnection, 'prototype', {
+        value: OriginalRTCPeerConnection.prototype
+      });
     });
 
     const url = `${TEST_CONFIG.baseUrl}?mode=${architecture}&role=viewer&roomId=${roomId}`;

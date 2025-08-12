@@ -65,6 +65,7 @@ services:
       context: ./automation_scripts
       dockerfile: Dockerfile
     container_name: webrtc_automation
+    user: root  # Need root permissions for Docker socket access
     volumes:
       - ./results:/app/results
       - /var/run/docker.sock:/var/run/docker.sock  # For Docker-in-Docker

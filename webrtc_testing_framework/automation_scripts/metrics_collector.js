@@ -10,8 +10,8 @@ class MetricsCollector {
       cpu: { samples: [], average: 0, max: 0, min: 100 },
       memory: { samples: [], average: 0, max: 0 },
       bandwidth: { samples: [], total: 0, peak: 0 },
-      latency: { samples: [], average: 0, min: 1000, max: 0 },
-      jitter: { samples: [], average: 0, min: 1000, max: 0 },
+      latency: { samples: [], average: 0, min: 0, max: 0 },
+      jitter: { samples: [], average: 0, min: 0, max: 0 },
       textLegibility: 0,
       connectionStats: {},
       timestamps: []
@@ -34,57 +34,32 @@ class MetricsCollector {
     this.metrics.timestamps.push(timestamp);
 
     try {
-      // Check if we have simulated metrics
-      const simulatedMetrics = await this.presenterPage.evaluate(() => {
-        return window._simulatedMetrics || null;
-      });
-      
-      if (simulatedMetrics) {
-        // Use simulated metrics for testing
-        const cpu = simulatedMetrics.cpu.current + (Math.random() - 0.5) * 5;
-        const bandwidth = simulatedMetrics.bandwidth.current + (Math.random() - 0.5) * 0.5;
-        
-        this.metrics.cpu.samples.push(Math.max(0, Math.min(100, cpu)));
-        this.metrics.memory.samples.push(25 + Math.random() * 15); // Simulated memory usage
-        this.metrics.bandwidth.samples.push(Math.max(0, bandwidth));
-      } else {
-        // Collect real system metrics
-        const systemMetrics = await this.getSystemMetrics();
-        if (systemMetrics) {
-          this.metrics.cpu.samples.push(systemMetrics.cpu);
-          this.metrics.memory.samples.push(systemMetrics.memory);
-        }
+      // Collect real system metrics only
+      const systemMetrics = await this.getSystemMetrics();
+      if (systemMetrics) {
+        this.metrics.cpu.samples.push(systemMetrics.cpu);
+        this.metrics.memory.samples.push(systemMetrics.memory);
+      }
 
-        // Collect bandwidth metrics
-        const bandwidthUsage = await this.getBandwidthUsage();
-        if (bandwidthUsage > 0) {
-          this.metrics.bandwidth.samples.push(bandwidthUsage);
+      // Collect real bandwidth metrics
+      const bandwidthUsage = await this.getBandwidthUsage();
+      if (bandwidthUsage > 0) {
+        this.metrics.bandwidth.samples.push(bandwidthUsage);
+      }
+
+      // Collect real latency from all viewers
+      for (let i = 0; i < this.viewerPages.length; i++) {
+        const latency = await this.getLatency(this.viewerPages[i]);
+        if (latency > 0) {
+          this.metrics.latency.samples.push(latency);
         }
       }
 
-      // Collect latency and jitter (simulated or real)
-      if (simulatedMetrics) {
-        // Simulated latency and jitter for testing
-        const baseLatency = 45 + Math.random() * 30; // 45-75ms
-        const baseJitter = 8 + Math.random() * 12; // 8-20ms
-        
-        this.metrics.latency.samples.push(baseLatency);
-        this.metrics.jitter.samples.push(baseJitter);
-      } else {
-        // Collect real latency from all viewers
-        for (let i = 0; i < this.viewerPages.length; i++) {
-          const latency = await this.getLatency(this.viewerPages[i]);
-          if (latency > 0) {
-            this.metrics.latency.samples.push(latency);
-          }
-        }
-
-        // Collect real jitter from all viewers
-        for (let i = 0; i < this.viewerPages.length; i++) {
-          const jitter = await this.getJitter(this.viewerPages[i]);
-          if (jitter > 0) {
-            this.metrics.jitter.samples.push(jitter);
-          }
+      // Collect real jitter from all viewers
+      for (let i = 0; i < this.viewerPages.length; i++) {
+        const jitter = await this.getJitter(this.viewerPages[i]);
+        if (jitter > 0) {
+          this.metrics.jitter.samples.push(jitter);
         }
       }
 
@@ -98,20 +73,40 @@ class MetricsCollector {
 
   async getSystemMetrics() {
     try {
-      // Get Chrome/Chromium process stats
-      const cpuCmd = `docker exec ${this.containerName} ps aux | grep -E '(chrome|chromium)' | grep -v grep | awk '{cpu += $3; mem += $4} END {print cpu "," mem}'`;
-      const result = await this.executeCommand(cpuCmd);
+      // Use Puppeteer's built-in metrics to calculate CPU usage over time
+      const presenterMetrics = await this.presenterPage.metrics();
       
-      if (result && result.includes(',')) {
-        const [cpu, memory] = result.split(',').map(parseFloat);
-        return {
-          cpu: cpu || 0,
-          memory: memory || 0
-        };
+      if (presenterMetrics.TaskDuration !== undefined) {
+        const currentTaskDuration = presenterMetrics.TaskDuration;
+        const currentTime = Date.now();
+        
+        // Calculate CPU usage as change in TaskDuration over time interval
+        if (this.lastMetrics) {
+          const timeDiffSeconds = (currentTime - this.lastMetrics.time) / 1000;
+          const taskDurationDiff = currentTaskDuration - this.lastMetrics.taskDuration;
+          
+          // CPU percentage = (time spent in tasks / total time) * 100
+          const cpuPercentage = (taskDurationDiff / timeDiffSeconds) * 100;
+          
+          this.lastMetrics = { taskDuration: currentTaskDuration, time: currentTime };
+          
+          return {
+            cpu: Math.min(100, Math.max(0, cpuPercentage)),
+            memory: presenterMetrics.JSHeapUsedSize ? (presenterMetrics.JSHeapUsedSize / (1024 * 1024)) : 0
+          };
+        } else {
+          // First measurement - store baseline and return 0
+          this.lastMetrics = { taskDuration: currentTaskDuration, time: currentTime };
+          return {
+            cpu: 0,
+            memory: presenterMetrics.JSHeapUsedSize ? (presenterMetrics.JSHeapUsedSize / (1024 * 1024)) : 0
+          };
+        }
       }
       
       return null;
     } catch (error) {
+      console.warn('Error getting system metrics:', error.message);
       return null;
     }
   }
@@ -148,17 +143,62 @@ class MetricsCollector {
 
   async getLatency(viewerPage) {
     try {
-      return await viewerPage.evaluate(() => {
-        // Get the latest latency from the viewer page
-        const latencyElement = document.querySelector('p');
-        if (latencyElement) {
-          const text = latencyElement.textContent;
-          const match = text.match(/Latest: (\\d+\\.\\d+)ms/);
-          return match ? parseFloat(match[1]) : 0;
+      return await viewerPage.evaluate(async () => {
+        // Check for P2P connections first
+        if (window.allPeerConnections && window.allPeerConnections.length > 0) {
+          console.log('[METRICS DEBUG] Found', window.allPeerConnections.length, 'P2P connections');
+          for (const pc of window.allPeerConnections) {
+            if (pc && pc.getStats) {
+              console.log('[METRICS DEBUG] Connection state:', pc.connectionState);
+              const stats = await pc.getStats();
+              console.log('[METRICS DEBUG] Stats report count:', stats.size);
+              
+              const reportTypes = [];
+              for (const report of stats.values()) {
+                reportTypes.push(report.type);
+                if (report.type === 'remote-inbound-rtp' && report.roundTripTime !== undefined) {
+                  console.log('[METRICS DEBUG] Found latency:', report.roundTripTime * 1000);
+                  return report.roundTripTime * 1000; // Convert to milliseconds
+                }
+                
+                if (report.type === 'candidate-pair' && report.currentRoundTripTime !== undefined && report.state === 'succeeded') {
+                  console.log('[METRICS DEBUG] Found latency from candidate-pair:', report.currentRoundTripTime * 1000);
+                  return report.currentRoundTripTime * 1000; // Convert to milliseconds
+                }
+              }
+              console.log('[METRICS DEBUG] Available report types:', [...new Set(reportTypes)]);
+            }
+          }
         }
+        
+        // Use the exposed mediasoup transports
+        if (window.mediasoupTransports && window.mediasoupTransports.length > 0) {
+          for (const transport of window.mediasoupTransports) {
+            if (transport && transport.getStats) {
+              const stats = await transport.getStats();
+              
+              for (const report of stats.values()) {
+                // Look for remote-inbound-rtp reports for round-trip time
+                if (report.type === 'remote-inbound-rtp' && report.roundTripTime !== undefined) {
+                  console.log('[METRICS DEBUG] Found latency from mediasoup:', report.roundTripTime * 1000);
+                  return report.roundTripTime * 1000; // Convert to milliseconds
+                }
+                
+                // Alternative: look for candidate-pair reports
+                if (report.type === 'candidate-pair' && report.currentRoundTripTime !== undefined && report.state === 'succeeded') {
+                  console.log('[METRICS DEBUG] Found latency from mediasoup candidate-pair:', report.currentRoundTripTime * 1000);
+                  return report.currentRoundTripTime * 1000; // Convert to milliseconds
+                }
+              }
+            }
+          }
+        }
+        
+        console.log('[METRICS DEBUG] No latency data found');
         return 0;
       });
     } catch (error) {
+      console.warn('Error getting latency:', error.message);
       return 0;
     }
   }
@@ -166,28 +206,63 @@ class MetricsCollector {
   async getJitter(viewerPage) {
     try {
       return await viewerPage.evaluate(async () => {
-        // Get jitter from WebRTC stats
-        if (window.webrtcService) {
-          const peerConnections = window.webrtcService.peerConnections;
-          
-          for (const [peerId, pc] of peerConnections) {
-            const stats = await pc.getStats();
-            
-            for (const report of stats.values()) {
-              if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
-                // Calculate jitter in milliseconds from jitterBufferDelay
-                if (report.jitterBufferDelay !== undefined && report.packetsReceived > 0) {
-                  // jitterBufferDelay is in seconds, convert to ms
-                  const jitterMs = (report.jitterBufferDelay * 1000) / report.packetsReceived;
-                  return jitterMs;
+        // Check for P2P connections first
+        if (window.allPeerConnections && window.allPeerConnections.length > 0) {
+          console.log('[JITTER DEBUG] Found', window.allPeerConnections.length, 'P2P connections');
+          for (const pc of window.allPeerConnections) {
+            if (pc && pc.getStats) {
+              const stats = await pc.getStats();
+              
+              for (const report of stats.values()) {
+                if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                  console.log('[JITTER DEBUG] Found inbound-rtp video report');
+                  // Use direct jitter property (in seconds, convert to ms)
+                  if (report.jitter !== undefined) {
+                    console.log('[JITTER DEBUG] Found jitter:', report.jitter * 1000);
+                    return report.jitter * 1000; // Convert to milliseconds
+                  }
+                  
+                  // Alternative: calculate from jitterBufferDelay
+                  if (report.jitterBufferDelay !== undefined && report.packetsReceived > 0) {
+                    const jitterMs = (report.jitterBufferDelay * 1000) / report.packetsReceived;
+                    console.log('[JITTER DEBUG] Calculated jitter from buffer:', jitterMs);
+                    return jitterMs;
+                  }
                 }
               }
             }
           }
         }
+        
+        // Use the exposed mediasoup transports
+        if (window.mediasoupTransports && window.mediasoupTransports.length > 0) {
+          for (const transport of window.mediasoupTransports) {
+            if (transport && transport.getStats) {
+              const stats = await transport.getStats();
+              
+              for (const report of stats.values()) {
+                if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                  // Use direct jitter property (in seconds, convert to ms)
+                  if (report.jitter !== undefined) {
+                    return report.jitter * 1000; // Convert to milliseconds
+                  }
+                  
+                  // Alternative: calculate from jitterBufferDelay
+                  if (report.jitterBufferDelay !== undefined && report.packetsReceived > 0) {
+                    const jitterMs = (report.jitterBufferDelay * 1000) / report.packetsReceived;
+                    return jitterMs;
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        console.log('[JITTER DEBUG] No jitter data found');
         return 0;
       });
     } catch (error) {
+      console.warn('Error getting jitter:', error.message);
       return 0;
     }
   }
@@ -264,7 +339,9 @@ class MetricsCollector {
   }
 
   async collectTextLegibilityScore() {
-    if (this.viewerPages.length === 0) return 0;
+    if (this.viewerPages.length === 0) {
+      return 0;
+    }
 
     try {
       // Take screenshot from first viewer
@@ -283,11 +360,15 @@ class MetricsCollector {
       const screenshotPath = `/tmp/test_screenshot_${Date.now()}.png`;
       await fs.writeFile(screenshotPath, screenshot);
 
-      // Run OCR analysis (simplified version)
+      // Run OCR analysis
       const ocrResult = await this.runOCR(screenshotPath);
       
       // Clean up
-      await fs.remove(screenshotPath);
+      try {
+        await fs.remove(screenshotPath);
+      } catch (cleanupError) {
+        // Ignore cleanup errors
+      }
 
       return this.calculateTextLegibilityScore(ocrResult);
 
@@ -440,7 +521,8 @@ class MetricsCollector {
       bandwidth: {
         total: this.metrics.bandwidth.total,
         peak: this.metrics.bandwidth.peak,
-        average: this.metrics.bandwidth.total / (this.metrics.bandwidth.samples.length || 1)
+        average: this.metrics.bandwidth.samples.length > 0 ? 
+          this.metrics.bandwidth.total / this.metrics.bandwidth.samples.length : 0
       },
       latency: {
         average: this.metrics.latency.average,
