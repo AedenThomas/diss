@@ -1,0 +1,2 @@
+Timestamp,Architecture,Num_Viewers,Packet_Loss_Rate,Presenter_Bandwidth,Repetition,Presenter_CPU_Avg,Presenter_CPU_Max,Presenter_Bandwidth_Usage,Avg_Latency_Ms,Min_Latency_Ms,Max_Latency_Ms,Avg_Jitter_Ms,Text_Legibility_Score,Test_Duration_Ms,Success,Error_Message
+2025-08-12T19:40:25.424Z,P2P,1,0,5mbit,1,0,0,0,0,1000,0,0,0,15000,true,

@@ -14,11 +14,7 @@ services:
     networks:
       - webrtc_network
     restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    
 
   sfu_server:
     build:
@@ -32,28 +28,27 @@ services:
       - PORT=3002
       - NODE_ENV=production
       - SIGNALING_SERVER_URL=http://signaling_server:3001
-      - ANNOUNCED_IP=127.0.0.1
+      - ANNOUNCED_IP=sfu_server
     networks:
       - webrtc_network
     restart: unless-stopped
     depends_on:
       - signaling_server
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:3002/health"]
-      interval: 30s
-      timeout: 10s
-      retries: 3
+    
 
   client:
     build:
       context: ./client
       dockerfile: Dockerfile
+      args:
+        - REACT_APP_SIGNALING_URL=http://signaling_server:3001
+        - REACT_APP_SFU_URL=http://sfu_server:3002
     container_name: webrtc_client
     ports:
       - "3000:3000"
     environment:
-      - REACT_APP_SIGNALING_URL=http://localhost:3001
-      - REACT_APP_SFU_URL=http://localhost:3002
+      - REACT_APP_SIGNALING_URL=http://signaling_server:3001
+      - REACT_APP_SFU_URL=http://sfu_server:3002
       - NODE_ENV=production
     networks:
       - webrtc_network

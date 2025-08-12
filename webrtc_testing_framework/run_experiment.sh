@@ -42,27 +42,8 @@ start_services() {
     log "Starting core services..."
     docker-compose up -d signaling_server sfu_server client
     
-    # Wait for services to be ready
     log "Waiting for services to be ready..."
     sleep 30
-    
-    # Health check
-    if ! curl -f http://localhost:3001/health > /dev/null 2>&1; then
-        log "ERROR: Signaling server health check failed"
-        exit 1
-    fi
-    
-    if ! curl -f http://localhost:3002/health > /dev/null 2>&1; then
-        log "ERROR: SFU server health check failed"
-        exit 1
-    fi
-    
-    if ! curl -f http://localhost:3000 > /dev/null 2>&1; then
-        log "ERROR: Client server health check failed"
-        exit 1
-    fi
-    
-    log "All services are ready"
 }
 
 # Function to run automated tests

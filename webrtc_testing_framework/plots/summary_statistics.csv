@@ -1,3 +1,2 @@
 Architecture,Total_Tests,Avg_CPU_Usage,Max_CPU_Usage,Avg_Latency,Min_Latency,Max_Latency,Avg_TLS,Min_TLS,Max_TLS
-P2P,24,54.91,100.00,71.15,30.75,130.81,8.00,1.50,17.50
-SFU,24,28.53,47.00,72.56,39.02,118.48,8.00,1.50,17.50
+P2P,1,0.00,0,0.00,0,0,0.00,0,0

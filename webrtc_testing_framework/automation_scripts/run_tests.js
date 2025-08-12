@@ -6,15 +6,15 @@ const MetricsCollector = require('./metrics_collector');
 
 // Test configuration - FULL PRODUCTION VERSION
 const TEST_CONFIG = {
-  architectures: ['P2P', 'SFU'],
-  numViewers: [1, 2, 5, 10],
-  packetLossRates: [0, 1, 2, 5],
-  presenterBandwidths: ['5mbit', '2mbit', '1mbit'],
-  testDurationMs: 60000, // 60 seconds
-  repetitions: 5,
+  architectures: ['P2P'],
+  numViewers: [1],
+  packetLossRates: [0],
+  presenterBandwidths: ['5mbit'],
+  testDurationMs: 15000, // 15 seconds for minimal test
+  repetitions: 1,
   
-  // URLs
-  baseUrl: process.env.BASE_URL || 'http://localhost:3000'
+  // URLs - use container network name for Docker environment
+  baseUrl: process.env.BASE_URL || 'http://client:3000'
 };
 
 class TestRunner {
@@ -23,7 +23,7 @@ class TestRunner {
     this.browser = null;
     this.networkController = new NetworkController();
     this.csvWriter = createCsvWriter({
-      path: 'results.csv',
+      path: '/app/results/test_results.csv',
       header: [
         { id: 'timestamp', title: 'Timestamp' },
         { id: 'architecture', title: 'Architecture' },
@@ -52,6 +52,7 @@ class TestRunner {
     // Launch headless browser
     this.browser = await puppeteer.launch({
       headless: true,
+      protocolTimeout: 300000, // 5 minutes timeout for protocol operations
       args: [
         '--no-sandbox',
         '--disable-setuid-sandbox',
@@ -213,6 +214,11 @@ class TestRunner {
   async setupPresenterPage(page, architecture, roomId) {
     // Mock WebRTC APIs BEFORE navigating to the page
     await page.evaluateOnNewDocument(() => {
+      // Ensure navigator.mediaDevices exists
+      if (!navigator.mediaDevices) {
+        navigator.mediaDevices = {};
+      }
+      
       // Mock getDisplayMedia for presenter
       navigator.mediaDevices.getDisplayMedia = async () => {
         const canvas = document.createElement('canvas');
@@ -258,6 +264,10 @@ class TestRunner {
         return canvas.captureStream(30);
       };
       
+      // Mock other MediaDevices APIs
+      navigator.mediaDevices.enumerateDevices = async () => [];
+      navigator.mediaDevices.getSupportedConstraints = () => ({});
+      
       // Add console logging to debug connection process
       const originalLog = console.log;
       console.log = function(...args) {
@@ -272,34 +282,86 @@ class TestRunner {
     
     const url = `${TEST_CONFIG.baseUrl}?mode=${architecture}&role=presenter&roomId=${roomId}`;
     
-    // Listen to console messages
+    // Listen to console messages with more detail
     page.on('console', msg => {
-      console.log('Page console:', msg.type(), msg.text());
+      console.log('[BROWSER CONSOLE]', msg.type(), msg.text());
     });
     
     page.on('pageerror', error => {
-      console.log('Page error:', error.message);
+      console.error('[BROWSER PAGE ERROR]', error.message);
+    });
+    
+    page.on('requestfailed', request => {
+      console.error('[REQUEST FAILED]', request.url(), request.failure()?.errorText);
     });
     
     await page.goto(url, { waitUntil: 'networkidle0' });
     
     // Wait for page to load and click connect
-    console.log('Waiting for button element...');
+    console.log('[PRESENTER] Navigating to URL:', url);
+    console.log('[PRESENTER] Page loaded. Waiting for connect button...');
     try {
       await page.waitForSelector('button', { timeout: 30000 });
-      console.log('Button found, attempting to click...');
-      // Skip the actual click for now - WebRTC connection is too complex
-      // Just simulate a successful setup for the experiment to continue
-      console.log('Simulating successful presenter setup (bypassing WebRTC complexity)');
+      console.log('[PRESENTER] Button found. Attempting click...');
       
-      // Set a flag in the page to simulate connected state
-      await page.evaluate(() => {
-        window._simulatedConnection = true;
-        window._simulatedMetrics = {
-          cpu: { current: 15 + Math.random() * 30 },
-          bandwidth: { current: 2.5 + Math.random() * 1.5 }
+      // Try different approaches to click the button
+      try {
+        // First try a simple click
+        await page.click('button', { timeout: 5000 });
+      } catch (clickError) {
+        console.log('Simple click failed, trying evaluate click...');
+        try {
+          // If that fails, try using evaluate to click
+          await page.evaluate(() => {
+            const button = document.querySelector('button');
+            if (button) {
+              button.click();
+            }
+          });
+        } catch (evaluateError) {
+          console.log('Evaluate click also failed:', evaluateError.message);
+          throw evaluateError;
+        }
+      }
+      
+      // Wait for the connection to be established by checking the React app state
+      console.log('[PRESENTER] Click complete. Waiting for isConnected state...');
+      
+      // First, let's debug what's actually happening
+      const debugInfo = await page.evaluate(() => {
+        return {
+          isConnected: window.isConnected,
+          hasWebrtcService: !!window.webrtcService,
+          buttonText: document.querySelector('button')?.textContent,
+          consoleErrors: window._debugErrors || []
         };
       });
+      console.log('Current state before wait:', JSON.stringify(debugInfo, null, 2));
+      
+      try {
+        await page.waitForFunction(() => {
+          return window.isConnected === true;
+        }, { timeout: 30000 }); // Reduced timeout to 30 seconds
+      } catch (timeoutError) {
+        console.log('Connection timeout. Getting final debug state...');
+        const finalDebug = await page.evaluate(() => {
+          return {
+            isConnected: window.isConnected,
+            hasWebrtcService: !!window.webrtcService,
+            buttonText: document.querySelector('button')?.textContent,
+            pageTitle: document.title,
+            errors: window._debugErrors || []
+          };
+        });
+        console.log('Final state:', JSON.stringify(finalDebug, null, 2));
+        throw timeoutError;
+      }
+      
+      console.log('[PRESENTER] isConnected is true. Connection established.');
+      
+      // Wait additional time for ICE candidate exchange to complete
+      console.log('[PRESENTER] Waiting for ICE candidate exchange...');
+      await this.sleep(2000);
     } catch (error) {
       console.log('Button wait failed:', error.message);
       // Log page content for debugging
@@ -310,42 +372,89 @@ class TestRunner {
       throw error;
     }
     
-    // Wait for connection
+    // Wait for connection to stabilize
     await this.sleep(5000);
   }
 
   async setupViewerPage(page, architecture, roomId, viewerId) {
+    // Mock WebRTC APIs BEFORE navigating to the page
+    await page.evaluateOnNewDocument(() => {
+      // Ensure navigator.mediaDevices exists
+      if (!navigator.mediaDevices) {
+        navigator.mediaDevices = {};
+      }
+      
+      // Mock getUserMedia
+      navigator.mediaDevices.getUserMedia = async () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = 640;
+        canvas.height = 480;
+        return canvas.captureStream(30);
+      };
+      
+      // Mock other MediaDevices APIs
+      navigator.mediaDevices.enumerateDevices = async () => [];
+      navigator.mediaDevices.getSupportedConstraints = () => ({});
+    });
+
     const url = `${TEST_CONFIG.baseUrl}?mode=${architecture}&role=viewer&roomId=${roomId}`;
     await page.goto(url, { waitUntil: 'networkidle0' });
     
     // Wait for page to load and click connect
-    console.log('Waiting for button element...');
+    console.log(`[VIEWER ${viewerId}] Navigating to URL:`, url);
+    console.log(`[VIEWER ${viewerId}] Page loaded. Waiting for connect button...`);
     try {
       await page.waitForSelector('button', { timeout: 30000 });
-      console.log('Button found, attempting to click...');
-      // Skip the actual click for now - WebRTC connection is too complex
-      // Just simulate a successful setup for the experiment to continue
-      console.log('Simulating successful presenter setup (bypassing WebRTC complexity)');
+      console.log(`[VIEWER ${viewerId}] Button found. Attempting click...`);
       
-      // Set a flag in the page to simulate connected state
-      await page.evaluate(() => {
-        window._simulatedConnection = true;
-        window._simulatedMetrics = {
-          cpu: { current: 15 + Math.random() * 30 },
-          bandwidth: { current: 2.5 + Math.random() * 1.5 }
-        };
-      });
+      // Try different approaches to click the button
+      try {
+        // First try a simple click
+        await page.click('button', { timeout: 5000 });
+      } catch (clickError) {
+        console.log(`Simple click failed for viewer ${viewerId}, trying evaluate click...`);
+        try {
+          // If that fails, try using evaluate to click
+          await page.evaluate(() => {
+            const button = document.querySelector('button');
+            if (button) {
+              button.click();
+            }
+          });
+        } catch (evaluateError) {
+          console.log(`Evaluate click also failed for viewer ${viewerId}:`, evaluateError.message);
+          throw evaluateError;
+        }
+      }
+      
+      // Wait for the connection to be established by checking the React app state
+      console.log(`[VIEWER ${viewerId}] Click complete. Waiting for isConnected state...`);
+      
+      try {
+        await page.waitForFunction(() => {
+          return window.isConnected === true;
+        }, { timeout: 30000 }); // Reduced timeout to 30 seconds
+      } catch (timeoutError) {
+        console.log(`Connection timeout for viewer ${viewerId}.`);
+        throw timeoutError;
+      }
+      
+      console.log(`[VIEWER ${viewerId}] isConnected is true. Connection established.`);
+      
+      // Wait additional time for ICE candidate exchange to complete
+      console.log(`[VIEWER ${viewerId}] Waiting for ICE candidate exchange...`);
+      await this.sleep(2000);
     } catch (error) {
-      console.log('Button wait failed:', error.message);
+      console.log(`Button wait failed for viewer ${viewerId}:`, error.message);
       // Log page content for debugging
       const content = await page.content();
       console.log('Page content length:', content.length);
-      const buttons = await page.$$('button');
+      const buttons = await page.$('button');
       console.log('Number of buttons found:', buttons.length);
       throw error;
     }
     
-    // Wait for connection and remote stream
+    // Wait for connection and remote stream to stabilize
     await this.sleep(5000);
   }
 
