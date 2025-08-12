@@ -21,6 +21,7 @@ from pathlib import Path
 import sys
 from typing import Dict, List, Tuple
 import logging
+from scipy.stats import ttest_ind
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -80,10 +81,19 @@ class WebRTCAnalyzer:
         # Convert bandwidth strings to numeric (extract number from "5mbit", "2mbit", etc.)
         self.df['Bandwidth_Mbps'] = self.df['Presenter_Bandwidth'].str.extract('(\\d+)').astype(float)
         
+        # Calculate Estimated Total Egress Bandwidth (Mbps)
+        # For P2P: presenter sends to each viewer (Presenter_Bandwidth_Usage * Num_Viewers)
+        # For SFU: presenter sends only one stream (Presenter_Bandwidth_Usage)
+        self.df['Egress_Bandwidth_Mbps'] = np.where(
+            self.df['Architecture'] == 'P2P',
+            self.df['Presenter_Bandwidth_Usage'] * self.df['Num_Viewers'],
+            self.df['Presenter_Bandwidth_Usage']
+        )
+        
         # Ensure numeric columns are properly typed
         numeric_columns = [
             'Num_Viewers', 'Packet_Loss_Rate', 'Presenter_CPU_Avg', 
-            'Avg_Latency_Ms', 'Text_Legibility_Score'
+            'Avg_Latency_Ms', 'Avg_Jitter_Ms', 'Text_Legibility_Score'
         ]
         
         for col in numeric_columns:
@@ -98,6 +108,91 @@ class WebRTCAnalyzer:
             logger.warning(f"Removed {before_count - after_count} rows with missing data")
         
         logger.info("Data preprocessing complete")
+    
+    def run_statistical_tests(self):
+        """Perform statistical significance testing between P2P and SFU architectures."""
+        logger.info("Running statistical significance tests...")
+        
+        print("\\n" + "="*80)
+        print("STATISTICAL SIGNIFICANCE TESTS")
+        print("="*80)
+        
+        # Test 1: Presenter CPU at N=10 viewers
+        print("\\nTest 1: Presenter CPU at N=10 viewers")
+        print("-" * 40)
+        p2p_cpu_10 = self.df[(self.df['Architecture'] == 'P2P') & (self.df['Num_Viewers'] == 10)]['Presenter_CPU_Avg']
+        sfu_cpu_10 = self.df[(self.df['Architecture'] == 'SFU') & (self.df['Num_Viewers'] == 10)]['Presenter_CPU_Avg']
+        
+        if len(p2p_cpu_10) > 0 and len(sfu_cpu_10) > 0:
+            t_stat, p_value = ttest_ind(p2p_cpu_10, sfu_cpu_10)
+            print(f"P2P CPU (N=10): {p2p_cpu_10.mean():.2f}% ± {p2p_cpu_10.std():.2f}% (n={len(p2p_cpu_10)})")
+            print(f"SFU CPU (N=10): {sfu_cpu_10.mean():.2f}% ± {sfu_cpu_10.std():.2f}% (n={len(sfu_cpu_10)})")
+            print(f"t-statistic: {t_stat:.4f}")
+            print(f"p-value: {p_value:.6f}")
+            if p_value < 0.001:
+                print("Result: ***HIGHLY SIGNIFICANT*** (p < 0.001)")
+            elif p_value < 0.01:
+                print("Result: **SIGNIFICANT** (p < 0.01)")
+            elif p_value < 0.05:
+                print("Result: *SIGNIFICANT* (p < 0.05)")
+            else:
+                print("Result: Not significant (p >= 0.05)")
+        else:
+            print("Insufficient data for CPU comparison at N=10 viewers")
+        
+        # Test 2: G2G Latency at 5% packet loss (for N=5 viewers)
+        print("\\nTest 2: G2G Latency at 5% packet loss (N=5 viewers)")
+        print("-" * 50)
+        p2p_latency_5loss = self.df[(self.df['Architecture'] == 'P2P') & 
+                                   (self.df['Num_Viewers'] == 5) & 
+                                   (self.df['Packet_Loss_Rate'] == 5)]['Avg_Latency_Ms']
+        sfu_latency_5loss = self.df[(self.df['Architecture'] == 'SFU') & 
+                                   (self.df['Num_Viewers'] == 5) & 
+                                   (self.df['Packet_Loss_Rate'] == 5)]['Avg_Latency_Ms']
+        
+        if len(p2p_latency_5loss) > 0 and len(sfu_latency_5loss) > 0:
+            t_stat, p_value = ttest_ind(p2p_latency_5loss, sfu_latency_5loss)
+            print(f"P2P Latency (5% loss, N=5): {p2p_latency_5loss.mean():.2f}ms ± {p2p_latency_5loss.std():.2f}ms (n={len(p2p_latency_5loss)})")
+            print(f"SFU Latency (5% loss, N=5): {sfu_latency_5loss.mean():.2f}ms ± {sfu_latency_5loss.std():.2f}ms (n={len(sfu_latency_5loss)})")
+            print(f"t-statistic: {t_stat:.4f}")
+            print(f"p-value: {p_value:.6f}")
+            if p_value < 0.001:
+                print("Result: ***HIGHLY SIGNIFICANT*** (p < 0.001)")
+            elif p_value < 0.01:
+                print("Result: **SIGNIFICANT** (p < 0.01)")
+            elif p_value < 0.05:
+                print("Result: *SIGNIFICANT* (p < 0.05)")
+            else:
+                print("Result: Not significant (p >= 0.05)")
+        else:
+            print("Insufficient data for latency comparison at 5% packet loss")
+        
+        # Test 3: Text Legibility Score at 1Mbps bandwidth
+        print("\\nTest 3: Text Legibility Score at 1Mbps bandwidth")
+        print("-" * 45)
+        p2p_tls_1mbps = self.df[(self.df['Architecture'] == 'P2P') & 
+                               (self.df['Bandwidth_Mbps'] == 1)]['Text_Legibility_Score']
+        sfu_tls_1mbps = self.df[(self.df['Architecture'] == 'SFU') & 
+                               (self.df['Bandwidth_Mbps'] == 1)]['Text_Legibility_Score']
+        
+        if len(p2p_tls_1mbps) > 0 and len(sfu_tls_1mbps) > 0:
+            t_stat, p_value = ttest_ind(p2p_tls_1mbps, sfu_tls_1mbps)
+            print(f"P2P TLS (1Mbps): {p2p_tls_1mbps.mean():.2f} ± {p2p_tls_1mbps.std():.2f} (n={len(p2p_tls_1mbps)})")
+            print(f"SFU TLS (1Mbps): {sfu_tls_1mbps.mean():.2f} ± {sfu_tls_1mbps.std():.2f} (n={len(sfu_tls_1mbps)})")
+            print(f"t-statistic: {t_stat:.4f}")
+            print(f"p-value: {p_value:.6f}")
+            if p_value < 0.001:
+                print("Result: ***HIGHLY SIGNIFICANT*** (p < 0.001)")
+            elif p_value < 0.01:
+                print("Result: **SIGNIFICANT** (p < 0.01)")
+            elif p_value < 0.05:
+                print("Result: *SIGNIFICANT* (p < 0.05)")
+            else:
+                print("Result: Not significant (p >= 0.05)")
+        else:
+            print("Insufficient data for TLS comparison at 1Mbps bandwidth")
+        
+        print("="*80)
     
     def generate_figure_6_1(self):
         """
@@ -297,6 +392,122 @@ class WebRTCAnalyzer:
         
         logger.info(f"Saved Figure 6.3 to {output_path}")
     
+    def generate_figure_6_4(self):
+        """
+        Generate Figure 6.4: Estimated Total Egress Bandwidth (Mbps) vs. Number of Viewers
+        Shows separate lines for P2P and SFU architectures.
+        """
+        logger.info("Generating Figure 6.4: Egress Bandwidth vs Viewers")
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Group by architecture and number of viewers, calculate mean egress bandwidth
+        grouped_data = self.df.groupby(['Architecture', 'Num_Viewers'])['Egress_Bandwidth_Mbps'].agg(['mean', 'std']).reset_index()
+        
+        # Plot lines for each architecture
+        architectures = ['P2P', 'SFU']
+        colors = {'P2P': '#e74c3c', 'SFU': '#3498db'}
+        markers = {'P2P': 'o', 'SFU': 's'}
+        
+        for arch in architectures:
+            arch_data = grouped_data[grouped_data['Architecture'] == arch]
+            
+            if len(arch_data) > 0:
+                ax.errorbar(
+                    arch_data['Num_Viewers'], 
+                    arch_data['mean'],
+                    yerr=arch_data['std'],
+                    label=arch,
+                    marker=markers[arch],
+                    linewidth=2.5,
+                    markersize=8,
+                    color=colors[arch],
+                    capsize=5
+                )
+        
+        ax.set_xlabel('Number of Viewers', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Estimated Total Egress Bandwidth (Mbps)', fontsize=12, fontweight='bold')
+        ax.set_title('Figure 6.4: Estimated Total Egress Bandwidth vs Number of Viewers', 
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        ax.legend(fontsize=11, loc='upper left')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        
+        # Add annotations for expected behavior
+        ax.text(0.02, 0.98, 
+               'Expected: P2P increases linearly\\n(N × presenter bandwidth)\\nSFU remains flat (single stream)', 
+               transform=ax.transAxes, 
+               fontsize=10, 
+               verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+        
+        plt.tight_layout()
+        output_path = self.output_dir / 'egress_bandwidth_vs_viewers.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        logger.info(f"Saved Figure 6.4 to {output_path}")
+    
+    def generate_figure_6_5(self):
+        """
+        Generate Figure 6.5: Average Jitter vs. Packet Loss Rate (%)
+        Shows separate lines for P2P and SFU architectures.
+        """
+        logger.info("Generating Figure 6.5: Jitter vs Packet Loss")
+        
+        fig, ax = plt.subplots(figsize=(10, 6))
+        
+        # Group by architecture and packet loss rate, calculate mean jitter
+        grouped_data = self.df.groupby(['Architecture', 'Packet_Loss_Rate'])['Avg_Jitter_Ms'].agg(['mean', 'std']).reset_index()
+        
+        # Plot lines for each architecture
+        architectures = ['P2P', 'SFU']
+        colors = {'P2P': '#e74c3c', 'SFU': '#3498db'}
+        markers = {'P2P': 'o', 'SFU': 's'}
+        
+        for arch in architectures:
+            arch_data = grouped_data[grouped_data['Architecture'] == arch]
+            
+            if len(arch_data) > 0:
+                ax.errorbar(
+                    arch_data['Packet_Loss_Rate'], 
+                    arch_data['mean'],
+                    yerr=arch_data['std'],
+                    label=arch,
+                    marker=markers[arch],
+                    linewidth=2.5,
+                    markersize=8,
+                    color=colors[arch],
+                    capsize=5
+                )
+        
+        ax.set_xlabel('Packet Loss Rate (%)', fontsize=12, fontweight='bold')
+        ax.set_ylabel('Average Jitter (ms)', fontsize=12, fontweight='bold')
+        ax.set_title('Figure 6.5: Average Jitter vs Packet Loss Rate', 
+                    fontsize=14, fontweight='bold', pad=20)
+        
+        ax.legend(fontsize=11, loc='upper left')
+        ax.grid(True, alpha=0.3)
+        ax.set_xlim(left=0)
+        ax.set_ylim(bottom=0)
+        
+        # Add annotations for expected behavior
+        ax.text(0.02, 0.98, 
+               'Expected: Both increase with packet loss.\\nP2P may be more sensitive to\\nnetwork instability.', 
+               transform=ax.transAxes, 
+               fontsize=10, 
+               verticalalignment='top',
+               bbox=dict(boxstyle='round', facecolor='lightgray', alpha=0.8))
+        
+        plt.tight_layout()
+        output_path = self.output_dir / 'jitter_vs_packet_loss.png'
+        plt.savefig(output_path, dpi=300, bbox_inches='tight')
+        plt.close()
+        
+        logger.info(f"Saved Figure 6.5 to {output_path}")
+    
     def generate_summary_statistics(self):
         """Generate summary statistics table."""
         logger.info("Generating summary statistics")
@@ -351,10 +562,15 @@ class WebRTCAnalyzer:
                 
             self.preprocess_data()
             
+            # Run statistical significance tests
+            self.run_statistical_tests()
+            
             # Generate all figures
             self.generate_figure_6_1()
             self.generate_figure_6_2()
             self.generate_figure_6_3()
+            self.generate_figure_6_4()
+            self.generate_figure_6_5()
             
             # Generate summary statistics
             self.generate_summary_statistics()

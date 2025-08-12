@@ -11,6 +11,7 @@ class MetricsCollector {
       memory: { samples: [], average: 0, max: 0 },
       bandwidth: { samples: [], total: 0, peak: 0 },
       latency: { samples: [], average: 0, min: 1000, max: 0 },
+      jitter: { samples: [], average: 0, min: 1000, max: 0 },
       textLegibility: 0,
       connectionStats: {},
       timestamps: []
@@ -33,24 +34,57 @@ class MetricsCollector {
     this.metrics.timestamps.push(timestamp);
 
     try {
-      // Collect system metrics
-      const systemMetrics = await this.getSystemMetrics();
-      if (systemMetrics) {
-        this.metrics.cpu.samples.push(systemMetrics.cpu);
-        this.metrics.memory.samples.push(systemMetrics.memory);
+      // Check if we have simulated metrics
+      const simulatedMetrics = await this.presenterPage.evaluate(() => {
+        return window._simulatedMetrics || null;
+      });
+      
+      if (simulatedMetrics) {
+        // Use simulated metrics for testing
+        const cpu = simulatedMetrics.cpu.current + (Math.random() - 0.5) * 5;
+        const bandwidth = simulatedMetrics.bandwidth.current + (Math.random() - 0.5) * 0.5;
+        
+        this.metrics.cpu.samples.push(Math.max(0, Math.min(100, cpu)));
+        this.metrics.memory.samples.push(25 + Math.random() * 15); // Simulated memory usage
+        this.metrics.bandwidth.samples.push(Math.max(0, bandwidth));
+      } else {
+        // Collect real system metrics
+        const systemMetrics = await this.getSystemMetrics();
+        if (systemMetrics) {
+          this.metrics.cpu.samples.push(systemMetrics.cpu);
+          this.metrics.memory.samples.push(systemMetrics.memory);
+        }
+
+        // Collect bandwidth metrics
+        const bandwidthUsage = await this.getBandwidthUsage();
+        if (bandwidthUsage > 0) {
+          this.metrics.bandwidth.samples.push(bandwidthUsage);
+        }
       }
 
-      // Collect bandwidth metrics
-      const bandwidthUsage = await this.getBandwidthUsage();
-      if (bandwidthUsage > 0) {
-        this.metrics.bandwidth.samples.push(bandwidthUsage);
-      }
+      // Collect latency and jitter (simulated or real)
+      if (simulatedMetrics) {
+        // Simulated latency and jitter for testing
+        const baseLatency = 45 + Math.random() * 30; // 45-75ms
+        const baseJitter = 8 + Math.random() * 12; // 8-20ms
+        
+        this.metrics.latency.samples.push(baseLatency);
+        this.metrics.jitter.samples.push(baseJitter);
+      } else {
+        // Collect real latency from all viewers
+        for (let i = 0; i < this.viewerPages.length; i++) {
+          const latency = await this.getLatency(this.viewerPages[i]);
+          if (latency > 0) {
+            this.metrics.latency.samples.push(latency);
+          }
+        }
 
-      // Collect latency from all viewers
-      for (let i = 0; i < this.viewerPages.length; i++) {
-        const latency = await this.getLatency(this.viewerPages[i]);
-        if (latency > 0) {
-          this.metrics.latency.samples.push(latency);
+        // Collect real jitter from all viewers
+        for (let i = 0; i < this.viewerPages.length; i++) {
+          const jitter = await this.getJitter(this.viewerPages[i]);
+          if (jitter > 0) {
+            this.metrics.jitter.samples.push(jitter);
+          }
         }
       }
 
@@ -121,6 +155,35 @@ class MetricsCollector {
           const text = latencyElement.textContent;
           const match = text.match(/Latest: (\\d+\\.\\d+)ms/);
           return match ? parseFloat(match[1]) : 0;
+        }
+        return 0;
+      });
+    } catch (error) {
+      return 0;
+    }
+  }
+
+  async getJitter(viewerPage) {
+    try {
+      return await viewerPage.evaluate(async () => {
+        // Get jitter from WebRTC stats
+        if (window.webrtcService) {
+          const peerConnections = window.webrtcService.peerConnections;
+          
+          for (const [peerId, pc] of peerConnections) {
+            const stats = await pc.getStats();
+            
+            for (const report of stats.values()) {
+              if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                // Calculate jitter in milliseconds from jitterBufferDelay
+                if (report.jitterBufferDelay !== undefined && report.packetsReceived > 0) {
+                  // jitterBufferDelay is in seconds, convert to ms
+                  const jitterMs = (report.jitterBufferDelay * 1000) / report.packetsReceived;
+                  return jitterMs;
+                }
+              }
+            }
+          }
         }
         return 0;
       });
@@ -354,6 +417,13 @@ class MetricsCollector {
       this.metrics.latency.max = Math.max(...this.metrics.latency.samples);
     }
 
+    // Calculate final jitter metrics
+    if (this.metrics.jitter.samples.length > 0) {
+      this.metrics.jitter.average = this.metrics.jitter.samples.reduce((a, b) => a + b, 0) / this.metrics.jitter.samples.length;
+      this.metrics.jitter.min = Math.min(...this.metrics.jitter.samples);
+      this.metrics.jitter.max = Math.max(...this.metrics.jitter.samples);
+    }
+
     // Get final text legibility score
     this.metrics.textLegibility = await this.collectTextLegibilityScore();
 
@@ -376,6 +446,11 @@ class MetricsCollector {
         average: this.metrics.latency.average,
         min: this.metrics.latency.min,
         max: this.metrics.latency.max
+      },
+      jitter: {
+        average: this.metrics.jitter.average,
+        min: this.metrics.jitter.min,
+        max: this.metrics.jitter.max
       },
       textLegibility: this.metrics.textLegibility,
       connectionStats: this.metrics.connectionStats,
