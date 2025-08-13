@@ -53,7 +53,7 @@ class WebRTCAnalyzer:
             # Validate required columns
             required_columns = [
                 'Architecture', 'Num_Viewers', 'Packet_Loss_Rate', 'Presenter_Bandwidth',
-                'Presenter_CPU_Avg', 'Avg_Latency_Ms', 'Text_Legibility_Score', 'Success'
+                'Presenter_CPU_Avg', 'Avg_Latency_Ms', 'Packets_Lost', 'Success'
             ]
             
             missing_columns = [col for col in required_columns if col not in self.df.columns]
@@ -93,7 +93,7 @@ class WebRTCAnalyzer:
         # Ensure numeric columns are properly typed
         numeric_columns = [
             'Num_Viewers', 'Packet_Loss_Rate', 'Presenter_CPU_Avg', 
-            'Avg_Latency_Ms', 'Avg_Jitter_Ms', 'Text_Legibility_Score'
+            'Avg_Latency_Ms', 'Avg_Jitter_Ms', 'Packets_Lost'
         ]
         
         for col in numeric_columns:
@@ -167,18 +167,18 @@ class WebRTCAnalyzer:
         else:
             print("Insufficient data for latency comparison at 5% packet loss")
         
-        # Test 3: Text Legibility Score at 1Mbps bandwidth
-        print("\\nTest 3: Text Legibility Score at 1Mbps bandwidth")
-        print("-" * 45)
-        p2p_tls_1mbps = self.df[(self.df['Architecture'] == 'P2P') & 
-                               (self.df['Bandwidth_Mbps'] == 1)]['Text_Legibility_Score']
-        sfu_tls_1mbps = self.df[(self.df['Architecture'] == 'SFU') & 
-                               (self.df['Bandwidth_Mbps'] == 1)]['Text_Legibility_Score']
+        # Test 3: Packets Lost at 1Mbps bandwidth
+        print("\\nTest 3: Packets Lost at 1Mbps bandwidth")
+        print("-" * 40)
+        p2p_packets_1mbps = self.df[(self.df['Architecture'] == 'P2P') & 
+                                   (self.df['Bandwidth_Mbps'] == 1)]['Packets_Lost']
+        sfu_packets_1mbps = self.df[(self.df['Architecture'] == 'SFU') & 
+                                   (self.df['Bandwidth_Mbps'] == 1)]['Packets_Lost']
         
-        if len(p2p_tls_1mbps) > 0 and len(sfu_tls_1mbps) > 0:
-            t_stat, p_value = ttest_ind(p2p_tls_1mbps, sfu_tls_1mbps)
-            print(f"P2P TLS (1Mbps): {p2p_tls_1mbps.mean():.2f} ± {p2p_tls_1mbps.std():.2f} (n={len(p2p_tls_1mbps)})")
-            print(f"SFU TLS (1Mbps): {sfu_tls_1mbps.mean():.2f} ± {sfu_tls_1mbps.std():.2f} (n={len(sfu_tls_1mbps)})")
+        if len(p2p_packets_1mbps) > 0 and len(sfu_packets_1mbps) > 0:
+            t_stat, p_value = ttest_ind(p2p_packets_1mbps, sfu_packets_1mbps)
+            print(f"P2P Packets Lost (1Mbps): {p2p_packets_1mbps.mean():.2f} ± {p2p_packets_1mbps.std():.2f} (n={len(p2p_packets_1mbps)})")
+            print(f"SFU Packets Lost (1Mbps): {sfu_packets_1mbps.mean():.2f} ± {sfu_packets_1mbps.std():.2f} (n={len(sfu_packets_1mbps)})")
             print(f"t-statistic: {t_stat:.4f}")
             print(f"p-value: {p_value:.6f}")
             if p_value < 0.001:
@@ -190,7 +190,7 @@ class WebRTCAnalyzer:
             else:
                 print("Result: Not significant (p >= 0.05)")
         else:
-            print("Insufficient data for TLS comparison at 1Mbps bandwidth")
+            print("Insufficient data for packets lost comparison at 1Mbps bandwidth")
         
         print("="*80)
     
@@ -289,8 +289,8 @@ class WebRTCAnalyzer:
                 )
         
         ax.set_xlabel('Packet Loss Rate (%)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Average G2G Latency (ms)', fontsize=12, fontweight='bold')
-        ax.set_title('Figure 6.2: Glass-to-Glass Latency vs Packet Loss Rate', 
+        ax.set_ylabel('Average Round-Trip Time (ms)\n(SFU is Presenter-to-Server RTT)', fontsize=12, fontweight='bold')
+        ax.set_title('Figure 6.2: Round-Trip Time vs Packet Loss Rate', 
                     fontsize=14, fontweight='bold', pad=20)
         
         ax.legend(fontsize=11, loc='upper left')
@@ -300,7 +300,7 @@ class WebRTCAnalyzer:
         
         # Add annotations for expected behavior
         ax.text(0.02, 0.98, 
-               'Expected: P2P starts lower but\\ndegrades sharply. SFU more resilient.', 
+               'Expected: Both should have non-zero RTT.\\nSFU may show better resilience to packet loss.', 
                transform=ax.transAxes, 
                fontsize=10, 
                verticalalignment='top',
@@ -313,17 +313,17 @@ class WebRTCAnalyzer:
         
         logger.info(f"Saved Figure 6.2 to {output_path}")
     
-    def generate_figure_6_3(self):
+    def generate_stream_quality_plot(self):
         """
-        Generate Figure 6.3: Text Legibility Score vs. Presenter Upload Bandwidth (Mbps)
+        Generate Figure 6.3: Stream Quality (Packets Lost) vs. Presenter Upload Bandwidth (Mbps)
         Shows separate series for P2P and SFU architectures.
         """
-        logger.info("Generating Figure 6.3: Text Legibility vs Bandwidth")
+        logger.info("Generating Figure 6.3: Stream Quality vs Bandwidth")
         
         fig, ax = plt.subplots(figsize=(10, 6))
         
-        # Group by architecture and bandwidth, calculate mean TLS
-        grouped_data = self.df.groupby(['Architecture', 'Bandwidth_Mbps'])['Text_Legibility_Score'].agg(['mean', 'std']).reset_index()
+        # Group by architecture and bandwidth, calculate mean Packets Lost
+        grouped_data = self.df.groupby(['Architecture', 'Bandwidth_Mbps'])['Packets_Lost'].agg(['mean', 'std']).reset_index()
         
         # Plot bars for each architecture
         architectures = ['P2P', 'SFU']
@@ -363,8 +363,8 @@ class WebRTCAnalyzer:
                 )
         
         ax.set_xlabel('Presenter Upload Bandwidth (Mbps)', fontsize=12, fontweight='bold')
-        ax.set_ylabel('Text Legibility Score (TLS)', fontsize=12, fontweight='bold')
-        ax.set_title('Figure 6.3: Text Legibility Score vs Presenter Upload Bandwidth', 
+        ax.set_ylabel('Packets Lost', fontsize=12, fontweight='bold')
+        ax.set_title('Figure 6.3: Stream Quality vs. Presenter Upload Bandwidth', 
                     fontsize=14, fontweight='bold', pad=20)
         
         ax.set_xticks(x + width / 2)
@@ -375,7 +375,7 @@ class WebRTCAnalyzer:
         
         # Add annotations for expected behavior
         ax.text(0.02, 0.98, 
-               'Expected: Both perform well at high bandwidth.\\nP2P degrades faster than SFU at low bandwidth.\\n(Lower score = better legibility)', 
+               'Expected: Packets Lost to be low at high bandwidth\\nand increase as bandwidth is constrained.\\nSFU may show better resilience (fewer lost packets).', 
                transform=ax.transAxes, 
                fontsize=10, 
                verticalalignment='top',
@@ -523,9 +523,9 @@ class WebRTCAnalyzer:
                     'Avg_Latency': arch_data['Avg_Latency_Ms'].mean(),
                     'Min_Latency': arch_data['Avg_Latency_Ms'].min(),
                     'Max_Latency': arch_data['Avg_Latency_Ms'].max(),
-                    'Avg_TLS': arch_data['Text_Legibility_Score'].mean(),
-                    'Min_TLS': arch_data['Text_Legibility_Score'].min(),
-                    'Max_TLS': arch_data['Text_Legibility_Score'].max()
+                    'Avg_Packets_Lost': arch_data['Packets_Lost'].mean(),
+                    'Min_Packets_Lost': arch_data['Packets_Lost'].min(),
+                    'Max_Packets_Lost': arch_data['Packets_Lost'].max()
                 }
                 summary_stats.append(stats)
         
@@ -564,7 +564,7 @@ class WebRTCAnalyzer:
             # Generate all figures
             self.generate_figure_6_1()
             self.generate_figure_6_2()
-            self.generate_figure_6_3()
+            self.generate_stream_quality_plot()
             self.generate_figure_6_4()
             self.generate_figure_6_5()
             

@@ -12,7 +12,7 @@ class MetricsCollector {
       bandwidth: { samples: [], total: 0, peak: 0 },
       latency: { samples: [], average: 0, min: 0, max: 0 },
       jitter: { samples: [], average: 0, min: 0, max: 0 },
-      textLegibility: 0,
+      packetsLost: { samples: [], total: 0 },
       connectionStats: {},
       timestamps: []
     };
@@ -60,6 +60,14 @@ class MetricsCollector {
         const jitter = await this.getJitter(this.viewerPages[i]);
         if (jitter > 0) {
           this.metrics.jitter.samples.push(jitter);
+        }
+      }
+
+      // Collect packets lost from all viewers
+      for (let i = 0; i < this.viewerPages.length; i++) {
+        const packetsLost = await this.getPacketsLost(this.viewerPages[i]);
+        if (packetsLost >= 0) {
+          this.metrics.packetsLost.samples.push(packetsLost);
         }
       }
 
@@ -143,6 +151,43 @@ class MetricsCollector {
 
   async getLatency(viewerPage) {
     try {
+      // NEW APPROACH: For SFU mode, first try querying presenter page for RTT
+      console.log('[METRICS DEBUG] Querying PRESENTER for SFU latency...');
+      try {
+        const presenterRTT = await this.presenterPage.evaluate(async () => {
+          if (window.mediasoupSendTransport) {
+            console.log('[METRICS DEBUG] Found mediasoup send transport on presenter');
+            try {
+              const stats = await window.mediasoupSendTransport.getStats();
+              console.log('[METRICS DEBUG] Send transport stats report count:', stats.size);
+              
+              const reportTypes = [];
+              for (const report of stats.values()) {
+                reportTypes.push(report.type);
+                // Look for remote-inbound-rtp reports - this is the stream received by the SFU
+                if (report.type === 'remote-inbound-rtp' && report.roundTripTime !== undefined) {
+                  console.log('[METRICS DEBUG] Found presenter-to-SFU RTT:', report.roundTripTime * 1000);
+                  return report.roundTripTime * 1000; // Convert to milliseconds
+                }
+              }
+              console.log('[METRICS DEBUG] Send transport available report types:', [...new Set(reportTypes)]);
+            } catch (error) {
+              console.log('[METRICS DEBUG] Error querying send transport stats:', error.message);
+            }
+          }
+          return null; // No RTT found on presenter
+        });
+        
+        if (presenterRTT !== null && presenterRTT > 0) {
+          console.log('[METRICS DEBUG] Successfully got presenter-to-SFU RTT:', presenterRTT);
+          return presenterRTT;
+        }
+      } catch (error) {
+        console.log('[METRICS DEBUG] Error querying presenter page:', error.message);
+      }
+      
+      // Fallback: Query viewer page (original logic)
+      console.log('[METRICS DEBUG] Falling back to viewer page query...');
       return await viewerPage.evaluate(async () => {
         // Check for P2P connections first
         if (window.allPeerConnections && window.allPeerConnections.length > 0) {
@@ -171,16 +216,57 @@ class MetricsCollector {
           }
         }
         
+        // Check for mediasoup consumers first (likely source of RTT data)
+        if (window.mediasoupConsumers && window.mediasoupConsumers.length > 0) {
+          console.log('[METRICS DEBUG] Found', window.mediasoupConsumers.length, 'mediasoup consumers');
+          for (const consumer of window.mediasoupConsumers) {
+            if (consumer && consumer.getStats) {
+              console.log('[METRICS DEBUG] Consumer state:', consumer.closed ? 'closed' : 'open');
+              const stats = await consumer.getStats();
+              console.log('[METRICS DEBUG] Consumer Stats report count:', stats.size);
+              
+              const reportTypes = [];
+              const allReports = [];
+              for (const report of stats.values()) {
+                reportTypes.push(report.type);
+                allReports.push({type: report.type, id: report.id, ...report});
+                
+                // Look for remote-outbound-rtp reports for round-trip time
+                if (report.type === 'remote-outbound-rtp' && report.roundTripTime !== undefined) {
+                  console.log('[METRICS DEBUG] Found latency from consumer remote-outbound-rtp:', report.roundTripTime * 1000);
+                  return report.roundTripTime * 1000; // Convert to milliseconds
+                }
+                
+                // Alternative: look for inbound-rtp reports with RTT
+                if (report.type === 'inbound-rtp' && report.roundTripTime !== undefined) {
+                  console.log('[METRICS DEBUG] Found latency from consumer inbound-rtp:', report.roundTripTime * 1000);
+                  return report.roundTripTime * 1000; // Convert to milliseconds
+                }
+              }
+              console.log('[METRICS DEBUG] Consumer Available report types:', [...new Set(reportTypes)]);
+              console.log('[METRICS DEBUG] Consumer All reports:', allReports);
+            }
+          }
+        }
+        
         // Use the exposed mediasoup transports
         if (window.mediasoupTransports && window.mediasoupTransports.length > 0) {
+          console.log('[METRICS DEBUG] Found', window.mediasoupTransports.length, 'mediasoup transports');
           for (const transport of window.mediasoupTransports) {
             if (transport && transport.getStats) {
+              console.log('[METRICS DEBUG] SFU Transport state:', transport.connectionState);
               const stats = await transport.getStats();
+              console.log('[METRICS DEBUG] SFU Stats report count:', stats.size);
               
+              const reportTypes = [];
+              const allReports = [];
               for (const report of stats.values()) {
+                reportTypes.push(report.type);
+                allReports.push({type: report.type, id: report.id, ...report});
+                
                 // Look for remote-inbound-rtp reports for round-trip time
                 if (report.type === 'remote-inbound-rtp' && report.roundTripTime !== undefined) {
-                  console.log('[METRICS DEBUG] Found latency from mediasoup:', report.roundTripTime * 1000);
+                  console.log('[METRICS DEBUG] Found latency from mediasoup remote-inbound-rtp:', report.roundTripTime * 1000);
                   return report.roundTripTime * 1000; // Convert to milliseconds
                 }
                 
@@ -190,6 +276,8 @@ class MetricsCollector {
                   return report.currentRoundTripTime * 1000; // Convert to milliseconds
                 }
               }
+              console.log('[METRICS DEBUG] SFU Available report types:', [...new Set(reportTypes)]);
+              console.log('[METRICS DEBUG] SFU All reports:', allReports);
             }
           }
         }
@@ -205,6 +293,22 @@ class MetricsCollector {
 
   async getJitter(viewerPage) {
     try {
+      // For SFU mode, jitter is not typically measured on the sending side
+      // Check if we're in SFU mode by querying presenter page
+      try {
+        const isSFU = await this.presenterPage.evaluate(() => {
+          return window.mediasoupSendTransport !== undefined;
+        });
+        
+        if (isSFU) {
+          console.log('[JITTER DEBUG] SFU mode detected - jitter not measured on sender side');
+          return 0; // SFU mode - return 0 for jitter
+        }
+      } catch (error) {
+        console.log('[JITTER DEBUG] Error checking SFU mode:', error.message);
+      }
+      
+      // P2P mode or fallback - query viewer page
       return await viewerPage.evaluate(async () => {
         // Check for P2P connections first
         if (window.allPeerConnections && window.allPeerConnections.length > 0) {
@@ -234,26 +338,76 @@ class MetricsCollector {
           }
         }
         
-        // Use the exposed mediasoup transports
-        if (window.mediasoupTransports && window.mediasoupTransports.length > 0) {
-          for (const transport of window.mediasoupTransports) {
-            if (transport && transport.getStats) {
-              const stats = await transport.getStats();
+        // Check for mediasoup consumers first (likely source of jitter data)
+        if (window.mediasoupConsumers && window.mediasoupConsumers.length > 0) {
+          console.log('[JITTER DEBUG] Found', window.mediasoupConsumers.length, 'mediasoup consumers');
+          for (const consumer of window.mediasoupConsumers) {
+            if (consumer && consumer.getStats) {
+              console.log('[JITTER DEBUG] Consumer state:', consumer.closed ? 'closed' : 'open');
+              const stats = await consumer.getStats();
+              console.log('[JITTER DEBUG] Consumer Stats report count:', stats.size);
               
+              const reportTypes = [];
+              const allReports = [];
               for (const report of stats.values()) {
-                if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                reportTypes.push(report.type);
+                allReports.push({type: report.type, id: report.id, ...report});
+                
+                if (report.type === 'inbound-rtp' && report.kind === 'video') {
+                  console.log('[JITTER DEBUG] Found inbound-rtp video report (Consumer):', report);
                   // Use direct jitter property (in seconds, convert to ms)
                   if (report.jitter !== undefined) {
+                    console.log('[JITTER DEBUG] Found jitter from consumer:', report.jitter * 1000);
                     return report.jitter * 1000; // Convert to milliseconds
                   }
                   
                   // Alternative: calculate from jitterBufferDelay
                   if (report.jitterBufferDelay !== undefined && report.packetsReceived > 0) {
                     const jitterMs = (report.jitterBufferDelay * 1000) / report.packetsReceived;
+                    console.log('[JITTER DEBUG] Calculated jitter from consumer buffer:', jitterMs);
                     return jitterMs;
                   }
                 }
               }
+              console.log('[JITTER DEBUG] Consumer Available report types:', [...new Set(reportTypes)]);
+              console.log('[JITTER DEBUG] Consumer All reports:', allReports);
+            }
+          }
+        }
+        
+        // Use the exposed mediasoup transports
+        if (window.mediasoupTransports && window.mediasoupTransports.length > 0) {
+          console.log('[JITTER DEBUG] Found', window.mediasoupTransports.length, 'mediasoup transports');
+          for (const transport of window.mediasoupTransports) {
+            if (transport && transport.getStats) {
+              console.log('[JITTER DEBUG] SFU Transport state:', transport.connectionState);
+              const stats = await transport.getStats();
+              console.log('[JITTER DEBUG] SFU Stats report count:', stats.size);
+              
+              const reportTypes = [];
+              const allReports = [];
+              for (const report of stats.values()) {
+                reportTypes.push(report.type);
+                allReports.push({type: report.type, id: report.id, ...report});
+                
+                if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                  console.log('[JITTER DEBUG] Found inbound-rtp video report (SFU):', report);
+                  // Use direct jitter property (in seconds, convert to ms)
+                  if (report.jitter !== undefined) {
+                    console.log('[JITTER DEBUG] Found jitter from mediasoup:', report.jitter * 1000);
+                    return report.jitter * 1000; // Convert to milliseconds
+                  }
+                  
+                  // Alternative: calculate from jitterBufferDelay
+                  if (report.jitterBufferDelay !== undefined && report.packetsReceived > 0) {
+                    const jitterMs = (report.jitterBufferDelay * 1000) / report.packetsReceived;
+                    console.log('[JITTER DEBUG] Calculated jitter from mediasoup buffer:', jitterMs);
+                    return jitterMs;
+                  }
+                }
+              }
+              console.log('[JITTER DEBUG] SFU Available report types:', [...new Set(reportTypes)]);
+              console.log('[JITTER DEBUG] SFU All reports:', allReports);
             }
           }
         }
@@ -338,131 +492,87 @@ class MetricsCollector {
     }
   }
 
-  async collectTextLegibilityScore() {
-    if (this.viewerPages.length === 0) {
-      return 0;
-    }
-
+  async getPacketsLost(viewerPage) {
     try {
-      // Take screenshot from first viewer
-      const screenshot = await this.viewerPages[0].screenshot({
-        encoding: 'binary',
-        fullPage: false,
-        clip: {
-          x: 0,
-          y: 0,
-          width: 800,
-          height: 600
+      return await viewerPage.evaluate(async () => {
+        console.log('[PACKETS_LOST DEBUG] Starting packets lost collection');
+        
+        // Check for P2P connections first
+        if (window.allPeerConnections && window.allPeerConnections.length > 0) {
+          console.log('[PACKETS_LOST DEBUG] Found', window.allPeerConnections.length, 'P2P connections');
+          for (const pc of window.allPeerConnections) {
+            if (pc && pc.getStats) {
+              console.log('[PACKETS_LOST DEBUG] P2P Connection state:', pc.connectionState);
+              const stats = await pc.getStats();
+              console.log('[PACKETS_LOST DEBUG] P2P Stats report count:', stats.size);
+              
+              const reportTypes = [];
+              for (const report of stats.values()) {
+                reportTypes.push(report.type);
+                if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                  console.log('[PACKETS_LOST DEBUG] Found inbound-rtp video report:', report);
+                  if (report.packetsLost !== undefined) {
+                    console.log('[PACKETS_LOST DEBUG] Found packets lost (P2P):', report.packetsLost);
+                    return report.packetsLost;
+                  }
+                }
+              }
+              console.log('[PACKETS_LOST DEBUG] P2P Available report types:', [...new Set(reportTypes)]);
+            }
+          }
         }
+        
+        // Check for SFU connections via mediasoup transports
+        if (window.mediasoupTransports && window.mediasoupTransports.length > 0) {
+          console.log('[PACKETS_LOST DEBUG] Found', window.mediasoupTransports.length, 'mediasoup transports');
+          for (const transport of window.mediasoupTransports) {
+            if (transport && transport.getStats) {
+              console.log('[PACKETS_LOST DEBUG] SFU Transport state:', transport.connectionState);
+              const stats = await transport.getStats();
+              console.log('[PACKETS_LOST DEBUG] SFU Stats report count:', stats.size);
+              
+              const reportTypes = [];
+              for (const report of stats.values()) {
+                reportTypes.push(report.type);
+                if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                  console.log('[PACKETS_LOST DEBUG] Found inbound-rtp video report (SFU):', report);
+                  if (report.packetsLost !== undefined) {
+                    console.log('[PACKETS_LOST DEBUG] Found packets lost (SFU):', report.packetsLost);
+                    return report.packetsLost;
+                  }
+                }
+              }
+              console.log('[PACKETS_LOST DEBUG] SFU Available report types:', [...new Set(reportTypes)]);
+            }
+          }
+        }
+        
+        // Also check window.webrtcService as a fallback
+        if (window.webrtcService && window.webrtcService.peerConnections) {
+          console.log('[PACKETS_LOST DEBUG] Found webrtcService with', window.webrtcService.peerConnections.size, 'peer connections');
+          for (const [peerId, pc] of window.webrtcService.peerConnections) {
+            if (pc && pc.getStats) {
+              const stats = await pc.getStats();
+              for (const report of stats.values()) {
+                if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                  console.log('[PACKETS_LOST DEBUG] Found inbound-rtp video report (webrtcService):', report);
+                  if (report.packetsLost !== undefined) {
+                    console.log('[PACKETS_LOST DEBUG] Found packets lost (webrtcService):', report.packetsLost);
+                    return report.packetsLost;
+                  }
+                }
+              }
+            }
+          }
+        }
+        
+        console.log('[PACKETS_LOST DEBUG] No packets lost data found, returning 0');
+        return 0;
       });
-
-      // Save screenshot for OCR analysis
-      const screenshotPath = `/tmp/test_screenshot_${Date.now()}.png`;
-      await fs.writeFile(screenshotPath, screenshot);
-
-      // Run OCR analysis
-      const ocrResult = await this.runOCR(screenshotPath);
-      
-      // Clean up
-      try {
-        await fs.remove(screenshotPath);
-      } catch (cleanupError) {
-        // Ignore cleanup errors
-      }
-
-      return this.calculateTextLegibilityScore(ocrResult);
-
     } catch (error) {
-      console.warn('Error collecting text legibility score:', error.message);
+      console.warn('Error getting packets lost:', error.message);
       return 0;
     }
-  }
-
-  async runOCR(imagePath) {
-    try {
-      // This is a simplified OCR implementation
-      // In practice, you would use pytesseract or similar
-      const mockOCRResult = [
-        'function calculateTotal(items) {',
-        'return items.reduce((sum, item) => {',
-        'return sum + (item.price * item.quantity);',
-        '}, 0);',
-        '}',
-        '',
-        'const cart = [',
-        '{ name: "Widget", price: 10.99, quantity: 2 },',
-        '{ name: "Gadget", price: 15.50, quantity: 1 },',
-        '{ name: "Tool", price: 8.25, quantity: 3 }',
-        '];',
-        '',
-        'const total = calculateTotal(cart);',
-        'console.log(`Total: $${total.toFixed(2)}`);'
-      ].join('\\n');
-
-      // Simulate some OCR errors based on video quality
-      const errorRate = Math.random() * 0.3; // 0-30% error rate
-      const errorCount = Math.floor(mockOCRResult.length * errorRate);
-      
-      return {
-        text: mockOCRResult,
-        confidence: 100 - (errorRate * 100),
-        errorCount: errorCount
-      };
-    } catch (error) {
-      return {
-        text: '',
-        confidence: 0,
-        errorCount: 100
-      };
-    }
-  }
-
-  calculateTextLegibilityScore(ocrResult) {
-    // Ground truth text
-    const groundTruth = [
-      'function calculateTotal(items) {',
-      'return items.reduce((sum, item) => {',
-      'return sum + (item.price * item.quantity);',
-      '}, 0);',
-      '}',
-      '',
-      'const cart = [',
-      '{ name: "Widget", price: 10.99, quantity: 2 },',
-      '{ name: "Gadget", price: 15.50, quantity: 1 },',
-      '{ name: "Tool", price: 8.25, quantity: 3 }',
-      '];',
-      '',
-      'const total = calculateTotal(cart);',
-      'console.log(`Total: $${total.toFixed(2)}`);'
-    ].join('\\n');
-
-    // Calculate Levenshtein distance
-    const distance = this.levenshteinDistance(groundTruth, ocrResult.text);
-    const maxLength = Math.max(groundTruth.length, ocrResult.text.length);
-    const accuracy = 1 - (distance / maxLength);
-    
-    // Text Legibility Score (lower is better, 0 = perfect)
-    return Math.round((1 - accuracy) * 100);
-  }
-
-  levenshteinDistance(str1, str2) {
-    const matrix = Array(str2.length + 1).fill().map(() => Array(str1.length + 1).fill(0));
-    
-    for (let i = 0; i <= str1.length; i++) matrix[0][i] = i;
-    for (let j = 0; j <= str2.length; j++) matrix[j][0] = j;
-    
-    for (let j = 1; j <= str2.length; j++) {
-      for (let i = 1; i <= str1.length; i++) {
-        const cost = str1[i - 1] === str2[j - 1] ? 0 : 1;
-        matrix[j][i] = Math.min(
-          matrix[j - 1][i] + 1,
-          matrix[j][i - 1] + 1,
-          matrix[j - 1][i - 1] + cost
-        );
-      }
-    }
-    
-    return matrix[str2.length][str1.length];
   }
 
   async stop() {
@@ -505,8 +615,10 @@ class MetricsCollector {
       this.metrics.jitter.max = Math.max(...this.metrics.jitter.samples);
     }
 
-    // Get final text legibility score
-    this.metrics.textLegibility = await this.collectTextLegibilityScore();
+    // Calculate final packets lost metrics
+    if (this.metrics.packetsLost.samples.length > 0) {
+      this.metrics.packetsLost.total = this.metrics.packetsLost.samples.reduce((a, b) => a + b, 0);
+    }
 
     return {
       cpu: {
@@ -534,7 +646,9 @@ class MetricsCollector {
         min: this.metrics.jitter.min,
         max: this.metrics.jitter.max
       },
-      textLegibility: this.metrics.textLegibility,
+      packetsLost: {
+        total: this.metrics.packetsLost.total
+      },
       connectionStats: this.metrics.connectionStats,
       sampleCount: this.metrics.timestamps.length,
       duration: this.metrics.timestamps.length > 0 ? 

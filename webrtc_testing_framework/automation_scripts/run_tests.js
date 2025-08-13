@@ -6,11 +6,12 @@ const MetricsCollector = require('./metrics_collector');
 
 // Test configuration - FULL PRODUCTION VERSION
 const TEST_CONFIG = {
-  architectures: ['P2P'],
-  numViewers: [1],
-  packetLossRates: [0],
-  presenterBandwidths: ['5mbit'],
-  testDurationMs: 15000, // 15 seconds for minimal test
+  // Definitive test suite covering all required scenarios
+  architectures: ['P2P', 'SFU'],
+  numViewers: [1, 5],
+  packetLossRates: [0, 5],
+  presenterBandwidths: ['1mbit', '5mbit'],
+  testDurationMs: 15000, // 15 seconds per test
   repetitions: 1,
   
   // URLs - use container network name for Docker environment
@@ -38,7 +39,7 @@ class TestRunner {
         { id: 'minLatency', title: 'Min_Latency_Ms' },
         { id: 'maxLatency', title: 'Max_Latency_Ms' },
         { id: 'avgJitter', title: 'Avg_Jitter_Ms' },
-        { id: 'textLegibilityScore', title: 'Text_Legibility_Score' },
+        { id: 'packetsLost', title: 'Packets_Lost' },
         { id: 'testDuration', title: 'Test_Duration_Ms' },
         { id: 'success', title: 'Success' },
         { id: 'errorMsg', title: 'Error_Message' }
@@ -66,6 +67,68 @@ class TestRunner {
     });
 
     console.log('Test runner initialized');
+  }
+
+  async runComprehensiveTests(testSuite) {
+    console.log('Starting comprehensive WebRTC performance tests...');
+    console.log(`Running ${testSuite.length} specific test cases...`);
+    
+    let testCount = 0;
+    
+    for (const testCase of testSuite) {
+      const [architecture, numViewers, packetLossRate, presenterBandwidth] = testCase;
+      testCount++;
+      
+      console.log(`\\nRunning test ${testCount}/${testSuite.length}`);
+      console.log(`Configuration: ${architecture}, ${numViewers} viewers, ${packetLossRate}% loss, ${presenterBandwidth} bandwidth`);
+      
+      try {
+        const result = await this.runSingleTest({
+          architecture,
+          numViewers,
+          packetLossRate,
+          presenterBandwidth,
+          repetition: 1
+        });
+        
+        this.results.push(result);
+        await this.csvWriter.writeRecords([result]);
+        
+        console.log(`Test ${testCount} completed successfully`);
+      } catch (error) {
+        console.error(`Test ${testCount} failed:`, error.message);
+        
+        const errorResult = {
+          timestamp: new Date().toISOString(),
+          architecture,
+          numViewers,
+          packetLossRate,
+          presenterBandwidth,
+          repetition: 1,
+          success: false,
+          errorMsg: error.message,
+          presenterCpuAvg: 0,
+          presenterCpuMax: 0,
+          presenterBandwidthUsage: 0,
+          avgLatency: 0,
+          minLatency: 0,
+          maxLatency: 0,
+          avgJitter: 0,
+          packetsLost: 0,
+          testDuration: 0
+        };
+        
+        this.results.push(errorResult);
+        await this.csvWriter.writeRecords([errorResult]);
+      }
+      
+      // Wait between tests
+      await this.sleep(5000);
+    }
+
+    console.log(`\\nAll tests completed! Results saved to results.csv`);
+    console.log(`Total successful tests: ${this.results.filter(r => r.success).length}`);
+    console.log(`Total failed tests: ${this.results.filter(r => !r.success).length}`);
   }
 
   async runAllTests() {
@@ -118,7 +181,7 @@ class TestRunner {
                   avgLatency: 0,
                   minLatency: 0,
                   maxLatency: 0,
-                  textLegibilityScore: 100,
+                  packetsLost: 0,
                   testDuration: 0
                 };
                 
@@ -169,6 +232,9 @@ class TestRunner {
     console.log('Waiting for connections to establish...');
     await this.sleep(10000);
     
+    // Additional stabilization time for metrics collection
+    await this.sleep(5000);
+    
     // Start metrics collection
     console.log('Starting metrics collection...');
     const metricsCollector = new MetricsCollector(presenterPage, viewerPages);
@@ -206,7 +272,7 @@ class TestRunner {
       minLatency: metrics.latency.min || 0,
       maxLatency: metrics.latency.max || 0,
       avgJitter: metrics.jitter.average || 0,
-      textLegibilityScore: metrics.textLegibility || 0,
+      packetsLost: metrics.packetsLost.total || 0,
       testDuration: TEST_CONFIG.testDurationMs
     };
   }
@@ -521,21 +587,34 @@ class TestRunner {
 }
 
 // Main execution
-async function main() {
-  const testRunner = new TestRunner();
-  
-  try {
-    await testRunner.initialize();
-    await testRunner.runAllTests();
-  } catch (error) {
-    console.error('Test execution failed:', error);
-  } finally {
-    await testRunner.cleanup();
-  }
-}
-
 if (require.main === module) {
-  main().catch(console.error);
+  (async () => {
+    const testRunner = new TestRunner();
+    console.log('Starting definitive WebRTC performance test suite...');
+
+    const DEFINITIVE_TEST_SUITE = [
+      // Test case: [Architecture, Num_Viewers, Packet_Loss_Rate, Presenter_Bandwidth]
+      ['P2P', 1, 0, '5mbit'],
+      ['SFU', 1, 0, '5mbit'],
+      ['P2P', 5, 0, '5mbit'],
+      ['SFU', 5, 0, '5mbit'],
+      ['SFU', 5, 5, '5mbit'], // Test with packet loss
+      ['SFU', 5, 0, '1mbit']  // Test with bandwidth constraint
+    ];
+
+    try {
+      await testRunner.initialize();
+      console.log('Running the definitive test suite with', DEFINITIVE_TEST_SUITE.length, 'test cases...');
+      
+      await testRunner.runComprehensiveTests(DEFINITIVE_TEST_SUITE);
+      console.log('All tests completed successfully.');
+    } catch (error) {
+      console.error('The test suite encountered a fatal error:', error);
+      process.exit(1);
+    } finally {
+      await testRunner.cleanup();
+    }
+  })();
 }
 
 module.exports = { TestRunner };
