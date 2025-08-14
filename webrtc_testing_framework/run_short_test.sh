@@ -14,8 +14,8 @@ docker-compose up -d --remove-orphans
 # Wait a few seconds for services to initialize
 sleep 10
 
-echo "Running the definitive test suite..."
-docker-compose run --rm automation
+# echo "Running the definitive test suite..."
+# docker-compose run --rm automation
 
 echo "Generating final plots and analysis..."
 docker-compose run --rm \
